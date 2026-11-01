@@ -1,0 +1,4 @@
+/build/vendor/
+/oci/
+/digests.txt
+/sbom.spdx.json
