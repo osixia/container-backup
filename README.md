@@ -143,6 +143,8 @@ Commands inside the image, with the archive at `/backup/backup.tar.gz.age`, the
 private identity at `/run/identity`, and an empty writable directory at `/restore`:
 
 ```bash
+set -euo pipefail
+
 age -d -i /run/identity -o /restore/backup.tar.gz /backup/backup.tar.gz.age
 
 # Only extract after age has successfully authenticated the complete file.
