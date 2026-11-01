@@ -31,6 +31,9 @@ RUN apk add --no-cache \
         jq \
         python3
 
+# Clients such as kubectl can keep their cache on a writable temporary mount.
+ENV HOME=/tmp
+
 # Jobs can select another UID when their mounted volumes require it.
 USER 65534:65534
 

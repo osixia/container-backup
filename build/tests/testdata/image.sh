@@ -4,6 +4,7 @@ set -euo pipefail
 
 # Versions and tools must match the documented image.
 [[ "$(id -u)" == 65534 ]]
+[[ "$HOME" == /tmp ]]
 [[ "$(age --version)" == "v$AGE_VERSION" ]]
 pg_dump --version | grep -q " $POSTGRESQL_MAJOR\."
 pg_dumpall --version | grep -q " $POSTGRESQL_MAJOR\."

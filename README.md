@@ -163,7 +163,8 @@ A Job selects `command: ["bash", "/scripts/backup.sh"]` and mounts the script,
 application data, working space, output volume and public recipient it needs.
 The image works with a read-only root filesystem and dropped capabilities when
 the chosen user can read and write those mounts. Mount writable `/tmp` if a tool
-needs temporary files or a client cache.
+needs temporary files or a client cache. `HOME` defaults to `/tmp` so clients can
+write their cache there instead of trying to write to the root filesystem.
 
 Mount only the public age recipient in backup Jobs. Mount application credentials
 as files rather than putting values into scripts. Disable service account token
