@@ -1,0 +1,18 @@
+schema: 1
+# Pin a released image digest before activation. develop is only for local tests.
+image: osixia/backup:develop
+services:
+  portal:
+    profile: sqlite
+    namespace: example-portal
+    settings:
+      RETENTION_DAYS: 15
+      SQLITE_FILE: /source/db.sqlite3
+      SQLITE_BACKUP_NAME: db.sqlite3
+    overlay:
+      patches:
+        - path: cronjob.yaml
+        - path: export.yaml
+    files:
+      cronjob.yaml: cronjob.yaml
+      export.yaml: export.yaml

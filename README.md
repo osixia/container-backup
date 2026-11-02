@@ -7,9 +7,10 @@ It is built from [osixia/container-age](https://github.com/osixia/container-age)
 using the same Alpine base and Osixia build pipeline. The source repository is
 `osixia/container-backup`; the container image is `osixia/backup`.
 
-The Dockerfile installs standard packages. There is no entrypoint or automatic
-backup routine: a Docker command or Kubernetes Job runs the script you provide.
-Application-specific steps, schedules and retention stay with the application.
+The image includes a backup engine and capture profiles. There is no entrypoint:
+a Docker command or Kubernetes Job explicitly starts the routine. A generator
+creates local Kubernetes manifests that each project commits to Git.
+See [the Kubernetes generator guide](kubernetes/README.md).
 
 ## Included tools
 

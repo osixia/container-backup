@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backups
+spec:
+  schedule: '20 2 * * *'
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: backup
+              volumeMounts:
+                - name: source
+                  mountPath: /source
+                  readOnly: true
+          volumes:
+            - name: source
+              persistentVolumeClaim:
+                claimName: portal-data
+                readOnly: true
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: portal
+                  topologyKey: kubernetes.io/hostname

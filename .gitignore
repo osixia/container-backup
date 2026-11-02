@@ -2,3 +2,6 @@
 /oci/
 /digests.txt
 /sbom.spdx.json
+
+__pycache__/
+*.pyc

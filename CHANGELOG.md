@@ -3,9 +3,13 @@
 Changes to the backup toolbox and its build configuration are recorded here.
 The toolbox uses its own version; it does not follow age's release numbers.
 
-## [Unreleased]
+## [1.0.0] - 2026-11-02
 
 ### Added
+
+- Shared backup engine and five capture profiles included in the image.
+- Generator for self-contained, Git-tracked Kustomize trees, with project
+  overlays, edit protection, scoped recovery RBAC and synthetic checks.
 
 - Backup toolbox based on `osixia/container-age` and Alpine 3.24.
 - age 1.3.2, GNU tar and file metadata tools, gzip, SQLite, PostgreSQL 18 clients,

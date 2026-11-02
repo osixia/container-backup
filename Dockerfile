@@ -31,6 +31,8 @@ RUN apk add --no-cache \
         jq \
         python3
 
+COPY runtime/ /usr/local/lib/backup/
+
 # Clients such as kubectl can keep their cache on a writable temporary mount.
 ENV HOME=/tmp
 

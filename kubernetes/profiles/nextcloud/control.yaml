@@ -1,0 +1,70 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backups
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backups-state
+data:
+  paused: 'false'
+  replicas: ''
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backups-control
+rules:
+  - apiGroups:
+      - ''
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ''
+    resources:
+      - configmaps
+    resourceNames:
+      - @@STATE_CONFIGMAP@@
+    verbs:
+      - get
+      - patch
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    resourceNames:
+      - @@APPLICATION@@
+    verbs:
+      - get
+  - apiGroups:
+      - apps
+    resources:
+      - deployments/scale
+    resourceNames:
+      - @@APPLICATION@@
+    verbs:
+      - get
+      - patch
+      - update
+  - apiGroups:
+      - autoscaling
+    resources:
+      - horizontalpodautoscalers
+    verbs:
+      - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backups-control
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: backups-control
+subjects:
+  - kind: ServiceAccount
+    name: backups

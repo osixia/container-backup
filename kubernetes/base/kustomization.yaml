@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- cronjob.yaml
+- export.yaml
+configMapGenerator:
+- name: backups-settings
+  literals:
+  - RETENTION_DAYS=15
+- name: backups-nginx
+  files:
+  - nginx.conf
