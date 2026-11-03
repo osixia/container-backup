@@ -74,6 +74,10 @@ def generate(config_path):
             if settings.get('STATE_CONFIGMAP', name + '-backups-state') != name + '-backups-state':
                 raise ValueError(f'{name}: STATE_CONFIGMAP is generated from the service name')
             settings['STATE_CONFIGMAP'] = name + '-backups-state'
+        if profile == 'gitlab':
+            native_cronjob = settings.get('GITLAB_BACKUP_CRONJOB')
+            if not isinstance(native_cronjob, str) or not re.fullmatch(r'[a-z0-9](?:[-a-z0-9]*[a-z0-9])?', native_cronjob):
+                raise ValueError(f'{name}: GITLAB_BACKUP_CRONJOB must identify the native chart CronJob')
         literals = [f'SERVICE={name}']
         for key, value in settings.items():
             if not re.fullmatch(r'[A-Z][A-Z0-9_]*', key) or not isinstance(value, (str, int)) or '\n' in str(value):
@@ -97,10 +101,12 @@ def generate(config_path):
             if key in overlay:
                 kustomization[key] = overlay[key]
         files[f'{name}/capture.sh'] = (ROOT / 'runtime/captures' / (profile + '.sh')).read_bytes()
-        if profile in {'mail', 'nextcloud', 'sqlite-offline'}:
-            control_profile = 'mail' if profile == 'mail' else 'deployment'
+        if profile in {'mail', 'nextcloud', 'sqlite-offline', 'gitlab'}:
+            control_profile = 'gitlab' if profile == 'gitlab' else ('mail' if profile == 'mail' else 'deployment')
             control = (ROOT / 'kubernetes/profiles' / control_profile / 'control.yaml').read_text()
-            control = control.replace('@@APPLICATION@@', settings['APPLICATION']).replace('@@STATE_CONFIGMAP@@', settings['STATE_CONFIGMAP'])
+            control = control.replace('@@APPLICATION@@', settings.get('APPLICATION', '')).replace('@@STATE_CONFIGMAP@@', settings.get('STATE_CONFIGMAP', ''))
+            if profile == 'gitlab':
+                control = control.replace('@@GITLAB_BACKUP_CRONJOB@@', settings['GITLAB_BACKUP_CRONJOB'])
             files[f'{name}/control.yaml'] = control.encode()
             files[f'{name}/kubeconfig.yaml'] = (ROOT / 'kubernetes/kubeconfig.yaml').read_bytes()
             kustomization['configMapGenerator'].append({'name': 'backups-kubeconfig', 'files': ['config=kubeconfig.yaml']})

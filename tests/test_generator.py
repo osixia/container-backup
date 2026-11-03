@@ -60,9 +60,9 @@ class GeneratorTest(unittest.TestCase):
 
     def test_removed_services_and_all_profiles(self):
         for profile in sorted(generator.PROFILES):
-            self.config['services'][profile.replace('-', '')] = {'profile': profile, 'namespace': 'example', 'settings': {'APPLICATION': 'workload'} if profile in {'mail', 'nextcloud', 'sqlite-offline'} else {}}
+            self.config['services'][profile.replace('-', '')] = {'profile': profile, 'namespace': 'example', 'settings': ({'APPLICATION': 'workload'} if profile in {'mail', 'nextcloud', 'sqlite-offline'} else {'GITLAB_BACKUP_CRONJOB': 'gitlab-toolbox-backup'} if profile == 'gitlab' else {})}
         output = self.generate()
-        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), 7)
+        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), 8)
         docs = self.build(output)
         for profile in ('mail', 'nextcloud', 'sqliteoffline'):
             role = next(d for d in docs if d['kind'] == 'Role' and d['metadata']['name'] == profile + '-backups-control')
@@ -71,7 +71,7 @@ class GeneratorTest(unittest.TestCase):
         del self.config['services']['mail']
         self.generate()
         self.assertFalse((output / 'mail/capture.sh').exists())
-        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), 6)
+        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), 7)
 
     def test_controlled_profiles_use_explicit_service_account_configuration(self):
         for profile in ('mail', 'nextcloud', 'sqlite-offline'):
@@ -87,6 +87,17 @@ class GeneratorTest(unittest.TestCase):
             client = yaml.safe_load(configmap['data']['config'])
             self.assertEqual(client['clusters'][0]['cluster']['server'], 'https://kubernetes.default.svc')
             self.assertEqual(client['users'][0]['user'], {'tokenFile': '/var/run/secrets/kubernetes.io/serviceaccount/token'})
+
+
+    def test_gitlab_capture_has_only_read_permissions(self):
+        self.config['services'] = {'gitlab': {'profile': 'gitlab', 'namespace': 'example', 'settings': {'GITLAB_BACKUP_CRONJOB': 'gitlab-toolbox-backup'}}}
+        docs = self.build(self.generate())
+        role = next(d for d in docs if d['kind'] == 'Role')
+        for rule in role['rules']:
+            self.assertLessEqual(set(rule['verbs']), {'get', 'list'})
+            self.assertLessEqual(set(rule['resources']), {'cronjobs', 'jobs'})
+        self.assertTrue(any(rule.get('resourceNames') == ['gitlab-toolbox-backup'] for rule in role['rules']))
+        self.assertFalse(any(d['kind'] == 'ConfigMap' and 'backups-state' in d['metadata']['name'] for d in docs))
 
     def test_digest_with_registry_port(self):
         self.config['image'] = 'registry.example:5000/backup@sha256:' + 'a' * 64

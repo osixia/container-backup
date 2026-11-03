@@ -151,3 +151,24 @@ local HTTPS API using a synthetic token and a disposable certificate. All other
 application orchestration is simulated. Only the temporary synthetic TLS fixture
 is mounted; no real data, kubeconfig or credentials are available in the container.
 The container has no external network and drops all capabilities.
+
+## GitLab chart native archive profile
+
+The `gitlab` profile consumes the archive made by the official GitLab Toolbox
+CronJob. It does not replace backup-utility, stop GitLab, or run pods/exec. Set
+GITLAB_BACKUP_CRONJOB to the native CronJob name, mount its persistent RWX
+scratch volume read-only at /source, and retain its archive with the vendor
+--skip-cleanup option. The generated Role only reads that CronJob and Jobs.
+
+Capture requires a recent completed Job owned by the current CronJob UID, no
+active native Job, and exactly one regular tar matching the Job time window.
+It checks the native metadata for omitted required components and refuses a
+replaced archive. Coordinate schedules and do not start manual native backups
+during encryption. Native snapshots have GitLab's normal online-backup semantics.
+
+BACKUP_SECRETS lists the operator and generated Rails/SSH/internal secrets to
+project and encrypt, without API read rights on Secrets. Both native plaintext
+S3 intermediates and local scratch must stay private. Only the age envelope and
+its final checksum are published. No private age identity is needed in Kubernetes.
+The generated capture uses the existing 1.0.1 engine/tools: no image rebuild is
+needed when distributing the capture through a project ConfigMap.

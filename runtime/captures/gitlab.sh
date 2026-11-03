@@ -1,0 +1,100 @@
+#!/bin/bash
+# The GitLab chart creates the native archive. This profile only validates and encrypts it.
+: "${GITLAB_BACKUP_CRONJOB:?Native GitLab CronJob required}"
+: "${GITLAB_MAX_BACKUP_AGE_MINUTES:=360}"
+[[ "$GITLAB_MAX_BACKUP_AGE_MINUTES" =~ ^[1-9][0-9]*$ ]]
+
+prepare_backup() {
+    k get cronjob "$GITLAB_BACKUP_CRONJOB" -o json > "$workdir/native-cronjob.json"
+    k get jobs -o json > "$workdir/native-jobs.json"
+    python3 - "$workdir" "$stage" "$GITLAB_BACKUP_CRONJOB" "$GITLAB_MAX_BACKUP_AGE_MINUTES" <<'PYTHON'
+import datetime
+import json
+from pathlib import Path
+import re
+import stat
+import sys
+import time
+
+work, stage = Path(sys.argv[1]), Path(sys.argv[2])
+name, max_age = sys.argv[3], int(sys.argv[4]) * 60
+cron = json.loads((work / 'native-cronjob.json').read_text())
+if cron.get('status', {}).get('active'):
+    sys.exit('Native GitLab backup still active; refusing capture.')
+owner_uid = cron['metadata']['uid']
+
+def timestamp(value):
+    return datetime.datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
+
+completed = []
+for job in json.loads((work / 'native-jobs.json').read_text()).get('items', []):
+    owners = job['metadata'].get('ownerReferences', [])
+    if not any(o.get('kind') == 'CronJob' and o.get('name') == name and o.get('uid') == owner_uid for o in owners):
+        continue
+    status = job.get('status', {})
+    conditions = status.get('conditions', [])
+    if not any(c.get('type') == 'Complete' and c.get('status') == 'True' for c in conditions):
+        continue
+    if status.get('active') or not status.get('startTime') or not status.get('completionTime'):
+        continue
+    completed.append((timestamp(status['completionTime']), timestamp(status['startTime']), job['metadata']['name']))
+if not completed:
+    sys.exit('No completed native GitLab backup job.')
+end, start, job_name = max(completed)
+now = time.time()
+if end > now + 60 or now - end > max_age:
+    sys.exit('Latest completed native GitLab backup is stale or dated in the future.')
+folder = Path('/source/backup_tars')
+candidates = []
+for path in folder.glob('*_gitlab_backup.tar'):
+    match = re.fullmatch(r'(\d{10,11})_\d{4}_\d{2}_\d{2}_[A-Za-z0-9.+_-]+_gitlab_backup\.tar', path.name)
+    if not match or not start - 2 <= int(match[1]) <= end + 2:
+        continue
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_mtime > end + 2:
+        continue
+    if path.resolve().parent != folder.resolve():
+        continue
+    candidates.append(path)
+if len(candidates) != 1:
+    sys.exit('Native GitLab archive missing or ambiguous for the completed job.')
+path = candidates[0]
+info = path.stat()
+metadata = {'job': job_name, 'native_archive': path.name, 'completed_at': end,
+            'size': info.st_size, 'mtime_ns': info.st_mtime_ns, 'inode': info.st_ino}
+(stage / 'gitlab-source.json').write_text(json.dumps(metadata, indent=2) + '\n')
+(work / 'native-path').write_text(str(path))
+PYTHON
+    native_archive=$(cat "$workdir/native-path")
+    # Read a fixed metadata member, never extract a tar tree onto the source volume.
+    tar -xOf "$native_archive" ./backup_information.yml > "$stage/backup_information.yml"
+    python3 - "$stage/backup_information.yml" <<'PYTHON'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+fields = dict(line.split(': ', 1) for line in text.splitlines() if ': ' in line)
+skipped = {s.strip() for s in fields.get(':skipped', '').strip('"\'').split(',') if s.strip()}
+required = {'db', 'repositories', 'registry', 'artifacts', 'lfs', 'uploads', 'packages'}
+if not fields.get(':gitlab_version') or not fields.get(':backup_id') or fields.get(':installation_type') != 'gitlab-helm-chart':
+    sys.exit('Invalid native GitLab backup metadata.')
+if required & skipped:
+    sys.exit('Native GitLab backup skipped a required component.')
+PYTHON
+}
+
+archive_backup() {
+    # Refuse a native run starting after selection, or a replaced native archive.
+    [[ "$(k get cronjob "$GITLAB_BACKUP_CRONJOB" -o json | jq '(.status.active // []) | length')" == 0 ]]
+    python3 - "$stage/gitlab-source.json" "$native_archive" <<'PYTHON'
+import json
+from pathlib import Path
+import sys
+metadata = json.loads(Path(sys.argv[1]).read_text())
+info = Path(sys.argv[2]).stat()
+if (info.st_size, info.st_mtime_ns, info.st_ino) != (metadata['size'], metadata['mtime_ns'], metadata['inode']):
+    sys.exit('Native GitLab archive changed before encryption.')
+PYTHON
+    tar --acls --xattrs --numeric-owner -czf - \
+        -C "$stage" . \
+        -C /source/backup_tars "$(basename "$native_archive")"
+}

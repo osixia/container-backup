@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backups
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backups-control
+rules:
+  - apiGroups: [batch]
+    resources: [cronjobs]
+    resourceNames: ['@@GITLAB_BACKUP_CRONJOB@@']
+    verbs: [get]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backups-control
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: backups-control
+subjects:
+  - kind: ServiceAccount
+    name: backups
