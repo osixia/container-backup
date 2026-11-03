@@ -60,18 +60,33 @@ class GeneratorTest(unittest.TestCase):
 
     def test_removed_services_and_all_profiles(self):
         for profile in sorted(generator.PROFILES):
-            self.config['services'][profile] = {'profile': profile, 'namespace': 'example', 'settings': {'APPLICATION': 'workload'} if profile in {'mail', 'nextcloud'} else {}}
+            self.config['services'][profile.replace('-', '')] = {'profile': profile, 'namespace': 'example', 'settings': {'APPLICATION': 'workload'} if profile in {'mail', 'nextcloud', 'sqlite-offline'} else {}}
         output = self.generate()
-        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), 6)
+        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), 7)
         docs = self.build(output)
-        for profile in ('mail', 'nextcloud'):
+        for profile in ('mail', 'nextcloud', 'sqliteoffline'):
             role = next(d for d in docs if d['kind'] == 'Role' and d['metadata']['name'] == profile + '-backups-control')
             self.assertTrue(any(rule.get('resourceNames') == ['workload'] for rule in role['rules']))
             self.assertTrue(any(rule.get('resourceNames') == [profile + '-backups-state'] for rule in role['rules']))
         del self.config['services']['mail']
         self.generate()
         self.assertFalse((output / 'mail/capture.sh').exists())
-        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), 5)
+        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), 6)
+
+    def test_controlled_profiles_use_explicit_service_account_configuration(self):
+        for profile in ('mail', 'nextcloud', 'sqlite-offline'):
+            self.config['services'] = {'fixture': {'profile': profile, 'namespace': 'example', 'settings': {'APPLICATION': 'workload'}}}
+            docs = self.build(self.generate())
+            job = next(d for d in docs if d['kind'] == 'CronJob')
+            pod = job['spec']['jobTemplate']['spec']['template']['spec']
+            self.assertTrue(pod['automountServiceAccountToken'])
+            container = pod['containers'][0]
+            self.assertIn({'name': 'KUBECONFIG', 'value': '/kube/config'}, container['env'])
+            volume = next(v for v in pod['volumes'] if v['name'] == 'kubeconfig')
+            configmap = next(d for d in docs if d['kind'] == 'ConfigMap' and d['metadata']['name'] == volume['configMap']['name'])
+            client = yaml.safe_load(configmap['data']['config'])
+            self.assertEqual(client['clusters'][0]['cluster']['server'], 'https://kubernetes.default.svc')
+            self.assertEqual(client['users'][0]['user'], {'tokenFile': '/var/run/secrets/kubernetes.io/serviceaccount/token'})
 
     def test_digest_with_registry_port(self):
         self.config['image'] = 'registry.example:5000/backup@sha256:' + 'a' * 64

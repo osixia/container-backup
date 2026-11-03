@@ -11,7 +11,7 @@ umask 077
 [[ "$SERVICE" =~ ^[a-z]+$ && "$RETENTION_DAYS" =~ ^[1-9][0-9]*$ ]]
 
 k() {
-    command kubectl --namespace="$POD_NAMESPACE" --request-timeout=30s "$@"
+    command kubectl --kubeconfig="${KUBECONFIG:?KUBECONFIG requis pour l’API Kubernetes}" --namespace="$POD_NAMESPACE" --request-timeout=30s "$@"
 }
 
 wait_for_application_stop() {

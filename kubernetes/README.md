@@ -48,7 +48,7 @@ local development, and a digest of the matching published engine for production.
 Service identifiers contain lowercase letters, matching the archive naming
 contract. Each service specifies:
 
-- `profile`: `sqlite`, `ldap`, `postgresql`, `mail` or `nextcloud`.
+- `profile`: `sqlite`, `sqlite-offline`, `ldap`, `postgresql`, `mail` or `nextcloud`.
 - `namespace`: an existing application namespace; namespaces are not created.
 - `settings`: non-secret environment variables, merged into `backups-settings`.
 - `files`: destination filename to project source file, relative to the config.
@@ -86,16 +86,20 @@ provide incremental backups or restore automation.
 | Profile | Required project inputs |
 | --- | --- |
 | sqlite | `SQLITE_FILE`, `SQLITE_BACKUP_NAME`; source mount; SQLite backup API and integrity check |
+| sqlite-offline | SQLite settings above plus `APPLICATION` Deployment name; briefly stop all writers, copy database/WAL/journal privately, request resumption, then back up and integrity-check the private copy |
 | ldap | `LDAP_MAX_DUMP_AGE_MINUTES`; `/source` holding completed native `openldap-cron-*.sha256` dumps and their `-config.gz`/`-data.gz` files |
 | postgresql | `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD_FILE`; client TLS settings and referenced files as needed; `pg_dumpall` |
 | mail | `APPLICATION` DaemonSet name; `/source/data`, `/source/state`, `/source/config` mounts |
 | nextcloud | `APPLICATION` Deployment name, `PGDATABASE`, `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD_FILE`; TLS settings/files; `/source/data` mount |
 
 Mail and Nextcloud interrupt the application for the complete capture and
-archive. Their profiles generate scoped RBAC, a ServiceAccount, token mounting,
+archive. Offline SQLite stops its Deployment only while copying the database and
+journals; the original volume stays read-only. Its shared-memory file is rebuilt
+in the private copy. Use this profile for WAL databases that cannot open from a
+read-only mount when the WAL/shared-memory files are absent. All three controlled profiles generate scoped RBAC, a ServiceAccount, token mounting,
 and a persistent ConfigMap with `paused: 'false'` and `replicas: ''` data. Mail
 requires get/list pods, get/patch its DaemonSet and get/patch its state ConfigMap.
-Nextcloud requires get/list pods and HPAs, get its Deployment, patch its
+Nextcloud and offline SQLite require get/list pods and HPAs, get its Deployment, patch its
 Deployment scale subresource and get/patch its state ConfigMap. Limit resource
 names where possible. The generated `STATE_CONFIGMAP` setting uses the final prefixed name; never
 reset recovery state by blindly reapplying its initial manifest.
@@ -111,7 +115,7 @@ The engine requests resumption on normal exit and SIGTERM. A failed resumption
 preserves `/published/.backup-lock`. SIGKILL or node loss can leave applications
 stopped. Suspend scheduling, ensure no backup job is active, inspect the public
 state ConfigMap, then restore the application: remove only Mail's temporary node
-selector, or scale Nextcloud to the remembered replicas. Verify availability,
+selector, or scale Nextcloud/offline SQLite to the remembered replicas. Verify availability,
 mark `paused: 'false'`, and remove the empty lock directory from the published
 volume through an explicitly authorized maintenance operation. Never remove a
 lock while another job is working. Jobs request resumption before releasing RWO
@@ -125,17 +129,25 @@ owners, ACLs and xattrs. Archives contain application files/dumps and optionally
 isolated compatible servers, and test each application's restore before enabling
 its schedule. Keep private age identities outside the cluster and Git.
 
+The controlled profiles mount a generated kubeconfig under `/kube/config` and
+set `KUBECONFIG` explicitly. It points to `https://kubernetes.default.svc`, the
+projected service-account CA and `tokenFile`, never a token value. The shared
+engine `k` helper requires this setting rather than silently using localhost.
+Custom captures invoking `k` must also provide an explicit kubeconfig. Backups
+that do not use the Kubernetes API need no kubeconfig or service-account token.
+
 ## Contributor checks
 
 ```sh
 python3 -m unittest discover -s tests -v
 docker build -t osixia/backup:extraction-test .
-docker run --rm -i --network none --read-only --user 0:911 \
-  --tmpfs /tmp --tmpfs /work --tmpfs /published --tmpfs /scripts \
-  --tmpfs /source --tmpfs /age --tmpfs /credentials \
-  osixia/backup:extraction-test bash -s < tests/runtime.sh
+python3 tests/check-runtime.py osixia/backup:extraction-test
 ```
 
-Generator tests require Kustomize. Runtime checks use only synthetic SQLite data,
-a disposable age identity, and shell fixtures for application orchestration.
-No host directory, kubeconfig or real credentials are mounted.
+Generator tests require Kustomize. Runtime checks require Docker, Python 3 and
+OpenSSL on the host. They cover bare WAL databases, recovery of committed WAL
+rows, resumption after a copy failure, and the real kubectl client against a
+local HTTPS API using a synthetic token and a disposable certificate. All other
+application orchestration is simulated. Only the temporary synthetic TLS fixture
+is mounted; no real data, kubeconfig or credentials are available in the container.
+The container has no external network and drops all capabilities.

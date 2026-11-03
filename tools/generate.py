@@ -67,7 +67,7 @@ def generate(config_path):
         if not isinstance(settings, dict) or 'SERVICE' in settings:
             raise ValueError(f'{name}: settings must be a mapping without SERVICE')
         settings = dict(settings)
-        if profile in {'mail', 'nextcloud'}:
+        if profile in {'mail', 'nextcloud', 'sqlite-offline'}:
             application = settings.get('APPLICATION')
             if not isinstance(application, str) or not re.fullmatch(r'[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?', application):
                 raise ValueError(f'{name}: APPLICATION must identify the workload')
@@ -97,14 +97,21 @@ def generate(config_path):
             if key in overlay:
                 kustomization[key] = overlay[key]
         files[f'{name}/capture.sh'] = (ROOT / 'runtime/captures' / (profile + '.sh')).read_bytes()
-        if profile in {'mail', 'nextcloud'}:
-            control = (ROOT / 'kubernetes/profiles' / profile / 'control.yaml').read_text()
+        if profile in {'mail', 'nextcloud', 'sqlite-offline'}:
+            control_profile = 'mail' if profile == 'mail' else 'deployment'
+            control = (ROOT / 'kubernetes/profiles' / control_profile / 'control.yaml').read_text()
             control = control.replace('@@APPLICATION@@', settings['APPLICATION']).replace('@@STATE_CONFIGMAP@@', settings['STATE_CONFIGMAP'])
             files[f'{name}/control.yaml'] = control.encode()
+            files[f'{name}/kubeconfig.yaml'] = (ROOT / 'kubernetes/kubeconfig.yaml').read_bytes()
+            kustomization['configMapGenerator'].append({'name': 'backups-kubeconfig', 'files': ['config=kubeconfig.yaml']})
             kustomization['resources'].append('control.yaml')
             auth_patch = {'apiVersion': 'batch/v1', 'kind': 'CronJob', 'metadata': {'name': 'backups'},
                           'spec': {'jobTemplate': {'spec': {'template': {'spec': {
-                              'serviceAccountName': 'backups', 'automountServiceAccountToken': True}}}}}}
+                              'serviceAccountName': 'backups', 'automountServiceAccountToken': True,
+                              'containers': [{'name': 'backup',
+                                  'env': [{'name': 'KUBECONFIG', 'value': '/kube/config'}],
+                                  'volumeMounts': [{'name': 'kubeconfig', 'mountPath': '/kube', 'readOnly': True}]}],
+                              'volumes': [{'name': 'kubeconfig', 'configMap': {'name': 'backups-kubeconfig'}}]}}}}}}
             kustomization['patches'] = [{'patch': dump(auth_patch).decode()}] + kustomization.get('patches', [])
         if 'capture' in service:
             capture_path = (config_path.parent / service['capture']).resolve()
@@ -115,7 +122,7 @@ def generate(config_path):
         if not isinstance(supplied, dict):
             raise ValueError(f'{name}: files must map destination filenames to project source paths')
         for target, source in supplied.items():
-            if not isinstance(target, str) or '/' in target or target in {'', '.', '..', 'kustomization.yaml', 'capture.sh', 'control.yaml'}:
+            if not isinstance(target, str) or '/' in target or target in {'', '.', '..', 'kustomization.yaml', 'capture.sh', 'control.yaml', 'kubeconfig.yaml'}:
                 raise ValueError(f'{name}: invalid destination filename')
             source_path = (config_path.parent / source).resolve()
             if not source_path.is_relative_to(config_path.parent):

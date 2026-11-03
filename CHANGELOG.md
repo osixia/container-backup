@@ -3,6 +3,16 @@
 Changes to the backup toolbox and its build configuration are recorded here.
 The toolbox uses its own version; it does not follow age's release numbers.
 
+## [1.0.1] - 2026-11-03
+
+### Fixed
+
+- Use an explicit in-cluster kubeconfig and the mounted service-account token
+  for application orchestration instead of relying on kubectl auto-detection.
+- Add an offline SQLite capture profile that briefly pauses a Deployment,
+  copies its database and journals privately, resumes it, then runs SQLite backup.
+- Share Deployment recovery between Nextcloud and offline SQLite captures.
+
 ## [1.0.0] - 2026-11-02
 
 ### Added
