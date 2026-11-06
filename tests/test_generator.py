@@ -1,5 +1,6 @@
 import copy
 import importlib.util
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -60,9 +61,9 @@ class GeneratorTest(unittest.TestCase):
 
     def test_removed_services_and_all_profiles(self):
         for profile in sorted(generator.PROFILES):
-            self.config['services'][profile.replace('-', '')] = {'profile': profile, 'namespace': 'example', 'settings': ({'APPLICATION': 'workload'} if profile in {'mail', 'nextcloud', 'sqlite-offline'} else {'GITLAB_BACKUP_CRONJOB': 'gitlab-toolbox-backup'} if profile == 'gitlab' else {})}
+            self.config['services'][profile.replace('-', '')] = {'profile': profile, 'namespace': 'example', 'settings': ({'APPLICATION': 'workload'} if profile in {'mail', 'nextcloud', 'sqlite-offline', 'vaultwarden', 'statefulset-offline'} else {'GITLAB_BACKUP_CRONJOB': 'gitlab-toolbox-backup'} if profile == 'gitlab' else {})}
         output = self.generate()
-        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), 8)
+        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), len(generator.PROFILES) + 1)
         docs = self.build(output)
         for profile in ('mail', 'nextcloud', 'sqliteoffline'):
             role = next(d for d in docs if d['kind'] == 'Role' and d['metadata']['name'] == profile + '-backups-control')
@@ -71,10 +72,10 @@ class GeneratorTest(unittest.TestCase):
         del self.config['services']['mail']
         self.generate()
         self.assertFalse((output / 'mail/capture.sh').exists())
-        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), 7)
+        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), len(generator.PROFILES))
 
     def test_controlled_profiles_use_explicit_service_account_configuration(self):
-        for profile in ('mail', 'nextcloud', 'sqlite-offline'):
+        for profile in ('mail', 'nextcloud', 'sqlite-offline', 'vaultwarden'):
             self.config['services'] = {'fixture': {'profile': profile, 'namespace': 'example', 'settings': {'APPLICATION': 'workload'}}}
             docs = self.build(self.generate())
             job = next(d for d in docs if d['kind'] == 'CronJob')
@@ -98,6 +99,52 @@ class GeneratorTest(unittest.TestCase):
             self.assertLessEqual(set(rule['resources']), {'cronjobs', 'jobs'})
         self.assertTrue(any(rule.get('resourceNames') == ['gitlab-toolbox-backup'] for rule in role['rules']))
         self.assertFalse(any(d['kind'] == 'ConfigMap' and 'backups-state' in d['metadata']['name'] for d in docs))
+
+    def coverage_config(self):
+        return {'profile': 'gitlab', 'namespace': 'another-project', 'settings': {
+            'GITLAB_BACKUP_CRONJOB': 'my-native-backup',
+            'GITLAB_TOOLBOX_IMAGE': 'registry.example/toolbox:19.5.3',
+            'GITLAB_NATIVE_PVC': 'another-native-data',
+            'GITLAB_S3_CONFIG_SECRET': 'another-s3-config',
+            'GITLAB_S3_CONFIG_KEY': 's3cfg',
+            'GITLAB_OBJECT_BUCKETS': json.dumps({name: 'another-' + name for name in ('registry', 'artifacts', 'lfs', 'uploads', 'packages')})}}
+
+    def test_gitlab_coverage_is_reusable_and_has_no_extra_api_permissions(self):
+        self.config['services'] = {'code': self.coverage_config()}
+        docs = self.build(self.generate())
+        pod = next(d for d in docs if d['kind'] == 'CronJob')['spec']['jobTemplate']['spec']['template']['spec']
+        init = pod['initContainers'][0]
+        self.assertEqual(init['image'], 'registry.example/toolbox:19.5.3')
+        self.assertEqual(next(v for v in pod['volumes'] if v['name'] == 'native')['persistentVolumeClaim'], {'claimName': 'another-native-data', 'readOnly': True})
+        secret = next(v for v in pod['volumes'] if v['name'] == 'gitlab-s3-config')['secret']
+        self.assertEqual(secret['secretName'], 'another-s3-config')
+        self.assertEqual(secret['items'], [{'key': 's3cfg', 'path': 'config'}])
+        configs = {d['metadata']['name'] for d in docs if d['kind'] == 'ConfigMap'}
+        for volume in pod['volumes']:
+            if 'configMap' in volume and volume['name'] != 'recipient':
+                self.assertIn(volume['configMap']['name'], configs)
+        roles = [d for d in docs if d['kind'] == 'Role']
+        self.assertTrue(all(set(rule['resources']) <= {'cronjobs', 'jobs'} for role in roles for rule in role['rules']))
+        self.assertIn('coverage.py', next(d for d in docs if d['kind'] == 'ConfigMap' and 'coverage' in d['metadata']['name'])['data'])
+        before = (self.backup / 'generated/.generated.json').read_bytes()
+        self.generate()
+        self.assertEqual(before, (self.backup / 'generated/.generated.json').read_bytes())
+
+    def test_partial_gitlab_coverage_settings_are_refused(self):
+        config = self.coverage_config()
+        for key in ('GITLAB_OBJECT_BUCKETS', 'GITLAB_TOOLBOX_IMAGE', 'GITLAB_NATIVE_PVC', 'GITLAB_S3_CONFIG_SECRET'):
+            self.config['services'] = {'code': copy.deepcopy(config)}
+            del self.config['services']['code']['settings'][key]
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.generate()
+
+    def test_additional_gitlab_object_bucket_is_supported(self):
+        config = self.coverage_config()
+        buckets = json.loads(config['settings']['GITLAB_OBJECT_BUCKETS'])
+        buckets['terraform_state'] = 'another-terraform-state'
+        config['settings']['GITLAB_OBJECT_BUCKETS'] = json.dumps(buckets)
+        self.config['services'] = {'code': config}
+        self.build(self.generate())
 
     def test_digest_with_registry_port(self):
         self.config['image'] = 'registry.example:5000/backup@sha256:' + 'a' * 64

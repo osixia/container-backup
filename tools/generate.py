@@ -67,7 +67,7 @@ def generate(config_path):
         if not isinstance(settings, dict) or 'SERVICE' in settings:
             raise ValueError(f'{name}: settings must be a mapping without SERVICE')
         settings = dict(settings)
-        if profile in {'mail', 'nextcloud', 'sqlite-offline'}:
+        if profile in {'mail', 'nextcloud', 'sqlite-offline', 'vaultwarden', 'statefulset-offline'}:
             application = settings.get('APPLICATION')
             if not isinstance(application, str) or not re.fullmatch(r'[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?', application):
                 raise ValueError(f'{name}: APPLICATION must identify the workload')
@@ -78,6 +78,32 @@ def generate(config_path):
             native_cronjob = settings.get('GITLAB_BACKUP_CRONJOB')
             if not isinstance(native_cronjob, str) or not re.fullmatch(r'[a-z0-9](?:[-a-z0-9]*[a-z0-9])?', native_cronjob):
                 raise ValueError(f'{name}: GITLAB_BACKUP_CRONJOB must identify the native chart CronJob')
+        gitlab_coverage = False
+        if profile == 'gitlab':
+            coverage_fields = {'GITLAB_OBJECT_BUCKETS', 'GITLAB_TOOLBOX_IMAGE',
+                               'GITLAB_NATIVE_PVC', 'GITLAB_S3_CONFIG_SECRET'}
+            if coverage_fields & settings.keys():
+                if not coverage_fields <= settings.keys():
+                    raise ValueError(f'{name}: all GitLab coverage settings are required')
+                try:
+                    bucket_map = json.loads(settings['GITLAB_OBJECT_BUCKETS'])
+                except (TypeError, ValueError) as error:
+                    raise ValueError(f'{name}: invalid GitLab bucket mapping') from error
+                if (not isinstance(bucket_map, dict)
+                        or not {'registry', 'artifacts', 'lfs', 'uploads', 'packages'} <= bucket_map.keys()
+                        or any(not re.fullmatch(r'[a-z][a-z0-9_]*', key) or key in {'db', 'repositories'} for key in bucket_map)
+                        or any(not isinstance(b, str) or not re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]', b) for b in bucket_map.values())):
+                    raise ValueError(f'{name}: declare all five GitLab object buckets')
+                for field in ('GITLAB_NATIVE_PVC', 'GITLAB_S3_CONFIG_SECRET'):
+                    if not isinstance(settings[field], str) or not re.fullmatch(r'[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?', settings[field]):
+                        raise ValueError(f'{name}: invalid {field}')
+                toolbox_image = settings['GITLAB_TOOLBOX_IMAGE']
+                if not isinstance(toolbox_image, str) or not toolbox_image or any(c.isspace() for c in toolbox_image) or ':' not in toolbox_image.rsplit('/', 1)[-1]:
+                    raise ValueError(f'{name}: explicit native Toolbox image required')
+                secret_key = settings.get('GITLAB_S3_CONFIG_KEY', 'config')
+                if not isinstance(secret_key, str) or not re.fullmatch(r'[-._a-zA-Z0-9]+', secret_key):
+                    raise ValueError(f'{name}: invalid S3 configuration key')
+                gitlab_coverage = True
         literals = [f'SERVICE={name}']
         for key, value in settings.items():
             if not re.fullmatch(r'[A-Z][A-Z0-9_]*', key) or not isinstance(value, (str, int)) or '\n' in str(value):
@@ -101,8 +127,8 @@ def generate(config_path):
             if key in overlay:
                 kustomization[key] = overlay[key]
         files[f'{name}/capture.sh'] = (ROOT / 'runtime/captures' / (profile + '.sh')).read_bytes()
-        if profile in {'mail', 'nextcloud', 'sqlite-offline', 'gitlab'}:
-            control_profile = 'gitlab' if profile == 'gitlab' else ('mail' if profile == 'mail' else 'deployment')
+        if profile in {'mail', 'nextcloud', 'sqlite-offline', 'vaultwarden', 'statefulset-offline', 'gitlab'}:
+            control_profile = 'gitlab' if profile == 'gitlab' else ('mail' if profile == 'mail' else ('statefulset' if profile == 'statefulset-offline' else 'deployment'))
             control = (ROOT / 'kubernetes/profiles' / control_profile / 'control.yaml').read_text()
             control = control.replace('@@APPLICATION@@', settings.get('APPLICATION', '')).replace('@@STATE_CONFIGMAP@@', settings.get('STATE_CONFIGMAP', ''))
             if profile == 'gitlab':
@@ -119,6 +145,35 @@ def generate(config_path):
                                   'volumeMounts': [{'name': 'kubeconfig', 'mountPath': '/kube', 'readOnly': True}]}],
                               'volumes': [{'name': 'kubeconfig', 'configMap': {'name': 'backups-kubeconfig'}}]}}}}}}
             kustomization['patches'] = [{'patch': dump(auth_patch).decode()}] + kustomization.get('patches', [])
+        if gitlab_coverage:
+            files[f'{name}/coverage.py'] = (ROOT / 'kubernetes/profiles/gitlab/coverage.py').read_bytes()
+            kustomization['configMapGenerator'].append({'name': 'backups-gitlab-coverage', 'files': ['coverage.py']})
+            coverage_patch = {
+                'apiVersion': 'batch/v1', 'kind': 'CronJob', 'metadata': {'name': 'backups'},
+                'spec': {'jobTemplate': {'spec': {'template': {'spec': {
+                    'initContainers': [{
+                        'name': 'gitlab-coverage', 'image': settings['GITLAB_TOOLBOX_IMAGE'],
+                        'command': ['python3', '/gitlab-coverage/coverage.py', 'preflight',
+                                    '/source/backup_tars', '/work/gitlab-coverage.json'],
+                        'envFrom': [{'configMapRef': {'name': 'backups-settings'}}],
+                        'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
+                                            'capabilities': {'drop': ['ALL'], 'add': ['DAC_READ_SEARCH']}},
+                        'resources': {'requests': {'cpu': '50m', 'memory': '128Mi'}, 'limits': {'memory': '256Mi'}},
+                        'volumeMounts': [
+                            {'name': 'native', 'mountPath': '/source', 'readOnly': True},
+                            {'name': 'gitlab-s3-config', 'mountPath': '/gitlab-s3-config', 'readOnly': True},
+                            {'name': 'gitlab-coverage-scripts', 'mountPath': '/gitlab-coverage', 'readOnly': True},
+                            {'name': 'work', 'mountPath': '/work'}, {'name': 'tmp', 'mountPath': '/tmp'}]}],
+                    'containers': [{'name': 'backup', 'volumeMounts': [
+                        {'name': 'native', 'mountPath': '/source', 'readOnly': True},
+                        {'name': 'gitlab-coverage-scripts', 'mountPath': '/gitlab-coverage', 'readOnly': True}]}],
+                    'volumes': [
+                        {'name': 'native', 'persistentVolumeClaim': {'claimName': settings['GITLAB_NATIVE_PVC'], 'readOnly': True}},
+                        {'name': 'gitlab-coverage-scripts', 'configMap': {'name': 'backups-gitlab-coverage'}},
+                        {'name': 'gitlab-s3-config', 'secret': {'secretName': settings['GITLAB_S3_CONFIG_SECRET'],
+                            'defaultMode': 256, 'items': [{'key': secret_key, 'path': 'config'}]}}]
+                }}}}}}
+            kustomization['patches'] = [{'patch': dump(coverage_patch).decode()}] + kustomization.get('patches', [])
         if 'capture' in service:
             capture_path = (config_path.parent / service['capture']).resolve()
             if not capture_path.is_relative_to(config_path.parent):
@@ -128,7 +183,7 @@ def generate(config_path):
         if not isinstance(supplied, dict):
             raise ValueError(f'{name}: files must map destination filenames to project source paths')
         for target, source in supplied.items():
-            if not isinstance(target, str) or '/' in target or target in {'', '.', '..', 'kustomization.yaml', 'capture.sh', 'control.yaml', 'kubeconfig.yaml'}:
+            if not isinstance(target, str) or '/' in target or target in {'', '.', '..', 'kustomization.yaml', 'capture.sh', 'control.yaml', 'kubeconfig.yaml', 'coverage.py'}:
                 raise ValueError(f'{name}: invalid destination filename')
             source_path = (config_path.parent / source).resolve()
             if not source_path.is_relative_to(config_path.parent):

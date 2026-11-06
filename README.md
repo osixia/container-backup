@@ -190,3 +190,79 @@ Registry credentials must be configured before creating a release tag.
 Project files use the [MIT license](LICENSE.md). The image's packages keep their
 respective upstream licenses. Build and CI integration are adapted from
 [osixia/container-age](https://github.com/osixia/container-age).
+
+## GitLab : composants vides et preuve de couverture
+
+Le profil `gitlab` est fourni par ce dépôt : `tools/generate.py` copie
+`runtime/captures/gitlab.sh` vers la ConfigMap de capture de chaque projet.
+Une correction de ce profil et des assets du générateur ne demande pas de
+reconstruire l’image du moteur si ses outils restent compatibles. Les fichiers
+`generated/` doivent être régénérés, jamais corrigés à la main.
+
+GitLab Toolbox 19.5.3 ne produit pas de sous-tar pour un bucket vide et l’inscrit
+dans `:skipped`, comme pour un composant omis ou inaccessible. Le profil strict
+historique refuse tous les composants requis ignorés. Pour distinguer les sources
+vides sans accepter les omissions, déclarer ces paramètres dans le service :
+
+```yaml
+profile: gitlab
+namespace: another-gitlab
+settings:
+  GITLAB_BACKUP_CRONJOB: another-toolbox-backup
+  GITLAB_TOOLBOX_IMAGE: registry.gitlab.com/gitlab-org/build/cng/gitlab-toolbox-ce:v19.5.3
+  GITLAB_NATIVE_PVC: another-toolbox-backup-tmp
+  GITLAB_S3_CONFIG_SECRET: another-backup-s3
+  GITLAB_S3_CONFIG_KEY: config
+  GITLAB_OBJECT_BUCKETS: '{"registry":"another-registry","artifacts":"another-artifacts","lfs":"another-lfs","uploads":"another-uploads","packages":"another-packages"}'
+```
+
+C’est un fragment à intégrer à la configuration du projet : conserver aussi ses
+références de Secrets à archiver, ses volumes de credentials et ses overlays de
+stockage/routage. Aucun nom de namespace, de bucket ou de Secret applicatif n’est
+codé en dur dans le profil commun. Ajouter les autres composants utilisés, par
+exemple `terraform_state`, à `GITLAB_OBJECT_BUCKETS` pour qu’ils soient contrôlés.
+Les cinq composants ci-dessus et base/dépôts restent obligatoires.
+
+Le générateur ajoute un init container utilisant l’image Toolbox native déclarée
+et son client `s3cmd`. Il monte le PVC natif en lecture seule et la seule
+configuration S3 nécessaire, fournie par le Secret existant. Aucun droit API
+Kubernetes supplémentaire, aucune lecture API de Secret, aucune clé age privée.
+L’endpoint est celui du fichier S3 du projet ; le générateur n’en charge pas la
+valeur. L’init ne télécharge pas les objets, ne modifie ni bucket ni archive.
+
+Pour chaque composant déclaré ignoré, une requête limitée à un objet doit réussir
+avec une liste vide. Erreur d’accès, timeout, bucket absent, préfixe ou objet
+présent font échouer le contrôle. Les composants non ignorés doivent avoir leur
+sous-tar ; la base et les dépôts ne peuvent jamais être ignorés. La preuve est
+liée au nom, taille, inode, mtime et SHA-256 de l’archive native et à la déclaration
+des buckets. Elle expire après cinq minutes et est revérifiée dans la capture
+avant d’être incluse sous `gitlab-coverage.json` dans le lot chiffré.
+
+Cette preuve décrit les buckets au moment du contrôle après la capture native ;
+elle ne transforme pas le backup GitLab en snapshot transactionnel global. Une
+écriture concurrente dans un bucket ignoré peut faire refuser la capture ; relancer
+alors une sauvegarde native. Ne pas faire de rotation des credentials pendant
+la capture et sa validation. Ne pas retirer un bucket utilisé de la déclaration
+pour contourner un échec. Les composants non déclarés ne sont pas réputés couverts.
+
+Les projets sans ces paramètres conservent le comportement strict historique.
+Les tests du profil et du générateur utilisent exclusivement des fixtures
+synthétiques (`python3 -m unittest discover -s tests -v`).
+
+## Profils de fichiers persistants
+
+`vaultwarden` reprend le protocole de pause/reprise du Deployment et capture
+`/source/data` complet (base, journaux SQLite, pièces jointes, Sends et clés).
+Il exige `APPLICATION` et `SQLITE_FILE`, et contrôle SQLite depuis une copie privée.
+Le PVC applicatif reste en lecture seule. Ce profil est partagé entre les projets,
+sans `capture:` spécifique dans les applications ni nouvelle image du moteur.
+
+`statefulset-offline` applique le même protocole à un StatefulSet nommé par
+`APPLICATION`, avec sauvegarde des répliques dans `STATE_CONFIGMAP`, arrêt de tous
+ses pods et refus d’un HPA avant intervention. Il archive `/source/data` complet,
+puis demande la reprise. Le générateur fournit un rôle limité au StatefulSet
+nommé, à son sous-resource `scale`, à ses pods et à la ConfigMap d’état. Il ne
+faut pas utiliser ce profil pour prétendre capturer des données conservées hors
+du PVC monté. Les répertoires éphémères et services externes restent à traiter
+selon le contexte applicatif. Une perte brutale du nœud peut demander une reprise
+opérateur ; lire l’état sauvegardé avant de remettre les répliques.
