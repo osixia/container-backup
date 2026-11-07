@@ -3,6 +3,20 @@
 Changes to the backup toolbox and its build configuration are recorded here.
 The toolbox uses its own version; it does not follow age's release numbers.
 
+## [1.1.0] - 2026-11-07
+
+### Added
+
+- Shared Vaultwarden and offline StatefulSet captures, and encrypted capture of
+  native GitLab archives with checks for legitimately empty object buckets.
+- Independent Kubernetes recovery CronJobs for Deployment, StatefulSet and Mail
+  pause/resume profiles, including recovery after terminal OOM/SIGKILL captures.
+  Recovery refuses active or unknown capture pods, claims state atomically and
+  retries partial resumption without mounting data volumes or application secrets.
+- Recovery is generated suspended alongside capture, can be disabled per service,
+  and requires explicit opt-in for custom captures. Failed backup locks remain
+  available for operator inspection; no memory limits or capture retries change.
+
 ## [1.0.1] - 2026-11-03
 
 ### Fixed

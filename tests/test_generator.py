@@ -63,7 +63,7 @@ class GeneratorTest(unittest.TestCase):
         for profile in sorted(generator.PROFILES):
             self.config['services'][profile.replace('-', '')] = {'profile': profile, 'namespace': 'example', 'settings': ({'APPLICATION': 'workload'} if profile in {'mail', 'nextcloud', 'sqlite-offline', 'vaultwarden', 'statefulset-offline'} else {'GITLAB_BACKUP_CRONJOB': 'gitlab-toolbox-backup'} if profile == 'gitlab' else {})}
         output = self.generate()
-        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), len(generator.PROFILES) + 1)
+        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), len(generator.PROFILES) + 1 + len(generator.PAUSED_PROFILES))
         docs = self.build(output)
         for profile in ('mail', 'nextcloud', 'sqliteoffline'):
             role = next(d for d in docs if d['kind'] == 'Role' and d['metadata']['name'] == profile + '-backups-control')
@@ -72,7 +72,7 @@ class GeneratorTest(unittest.TestCase):
         del self.config['services']['mail']
         self.generate()
         self.assertFalse((output / 'mail/capture.sh').exists())
-        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), len(generator.PROFILES))
+        self.assertEqual(len([d for d in self.build(output) if d['kind'] == 'CronJob']), len(generator.PROFILES) + len(generator.PAUSED_PROFILES) - 1)
 
     def test_controlled_profiles_use_explicit_service_account_configuration(self):
         for profile in ('mail', 'nextcloud', 'sqlite-offline', 'vaultwarden'):
@@ -99,6 +99,69 @@ class GeneratorTest(unittest.TestCase):
             self.assertLessEqual(set(rule['resources']), {'cronjobs', 'jobs'})
         self.assertTrue(any(rule.get('resourceNames') == ['gitlab-toolbox-backup'] for rule in role['rules']))
         self.assertFalse(any(d['kind'] == 'ConfigMap' and 'backups-state' in d['metadata']['name'] for d in docs))
+
+    def test_independent_recovery_for_each_paused_profile(self):
+        for profile in sorted(generator.PAUSED_PROFILES):
+            with self.subTest(profile=profile):
+                self.config['services'] = {'fixture': {
+                    'profile': profile, 'namespace': 'example', 'settings': {'APPLICATION': 'writers'}}}
+                docs = self.build(self.generate())
+                recovery = next(d for d in docs if d['kind'] == 'CronJob' and d['metadata']['name'] == 'fixture-backups-recovery')
+                self.assertTrue(recovery['spec']['suspend'])
+                self.assertEqual(recovery['spec']['schedule'], '* * * * *')
+                self.assertEqual(recovery['spec']['concurrencyPolicy'], 'Forbid')
+                job = recovery['spec']['jobTemplate']['spec']
+                self.assertEqual(job['activeDeadlineSeconds'], 120)
+                pod = job['template']['spec']
+                self.assertEqual(pod['serviceAccountName'], 'fixture-backups')
+                self.assertNotEqual(job['template']['metadata']['labels']['app.kubernetes.io/name'], 'backup-job')
+                self.assertFalse(any('persistentVolumeClaim' in v or 'secret' in v for v in pod['volumes']))
+                container = pod['containers'][0]
+                self.assertNotIn('envFrom', container)
+                self.assertEqual(container['image'], self.config['image'])
+                self.assertEqual(container['command'], ['bash', '/recovery/recover.sh'])
+                env = {e['name']: e.get('value') for e in container['env']}
+                kind = 'daemonset' if profile == 'mail' else 'statefulset' if profile == 'statefulset-offline' else 'deployment'
+                self.assertEqual(env['RECOVERY_KIND'], kind)
+                self.assertEqual(env['APPLICATION'], 'writers')
+                self.assertEqual(env['STATE_CONFIGMAP'], 'fixture-backups-state')
+                names = {d['metadata']['name'] for d in docs if d['kind'] == 'ConfigMap'}
+                self.assertTrue(all(v['configMap']['name'] in names for v in pod['volumes'] if 'configMap' in v))
+                self.assertEqual(container['securityContext']['capabilities'], {'drop': ['ALL']})
+                script = next(d for d in docs if d['kind'] == 'ConfigMap' and 'recover.sh' in d.get('data', {}))
+                self.assertEqual(script['data']['recover.sh'], (ROOT / 'runtime/recover.sh').read_text())
+
+    def test_recovery_opt_out_custom_capture_and_invalid_configuration(self):
+        self.config['services'] = {'fixture': {'profile': 'nextcloud', 'namespace': 'example',
+                                              'settings': {'APPLICATION': 'writers'}, 'recovery': False}}
+        output = self.generate()
+        self.assertFalse((output / 'fixture/recover.sh').exists())
+        del self.config['services']['fixture']['recovery']
+        (self.backup / 'custom.sh').write_text('#!/bin/bash\n')
+        self.config['services']['fixture']['capture'] = 'custom.sh'
+        output = self.generate()
+        self.assertFalse((output / 'fixture/recover.sh').exists())
+        self.config['services']['fixture']['recovery'] = True
+        output = self.generate()
+        self.assertTrue((output / 'fixture/recover.sh').exists())
+        self.config['services']['fixture']['recovery'] = 'yes'
+        with self.assertRaises(ValueError):
+            self.generate()
+        self.config['services']['fixture'].update(profile='sqlite', recovery=True)
+        with self.assertRaises(ValueError):
+            self.generate()
+
+    def test_service_and_recovery_isolation_in_shared_namespace(self):
+        self.config['services'] = {name: {'profile': 'nextcloud', 'namespace': 'example',
+                                        'settings': {'APPLICATION': name + '-app'}} for name in ('first', 'second')}
+        docs = self.build(self.generate())
+        for name in ('first', 'second'):
+            recovery = next(d for d in docs if d['kind'] == 'CronJob' and d['metadata']['name'] == name + '-backups-recovery')
+            pod = recovery['spec']['jobTemplate']['spec']['template']['spec']
+            self.assertEqual(pod['serviceAccountName'], name + '-backups')
+            self.assertEqual(next(e['value'] for e in pod['containers'][0]['env'] if e['name'] == 'SERVICE'), name)
+            role = next(d for d in docs if d['kind'] == 'Role' and d['metadata']['name'] == name + '-backups-control')
+            self.assertFalse(any('secrets' in rule['resources'] for rule in role['rules']))
 
     def coverage_config(self):
         return {'profile': 'gitlab', 'namespace': 'another-project', 'settings': {

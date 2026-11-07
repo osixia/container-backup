@@ -54,6 +54,11 @@ contract. Each service specifies:
 - `files`: destination filename to project source file, relative to the config.
 - `capture`: optional project script path overriding the selected capture profile.
   It is copied to `capture.sh`; a Mail/Nextcloud profile still generates its RBAC.
+- `recovery`: optional boolean. Built-in pause/resume profiles generate an
+  independent recovery CronJob by default; set `false` to omit it. Custom
+  `capture` scripts opt out by default. Enable recovery for a custom capture only
+  if it preserves the built-in pause-state, pod labels and backup-lock protocol.
+  Profiles that do not pause an application cannot enable recovery.
 - `overlay`: Kustomize `resources`, `patches`, `configMapGenerator`, `labels` and
   `replacements`. Referenced files must be supplied through `files` and use local
   filenames for a self-contained tree. Do not use remote resources.
@@ -111,15 +116,59 @@ Application volumes must be mounted read-only; do not add a recursive fsGroup.
 
 ## Recovery and restore
 
-The engine requests resumption on normal exit and SIGTERM. A failed resumption
-preserves `/published/.backup-lock`. SIGKILL or node loss can leave applications
-stopped. Suspend scheduling, ensure no backup job is active, inspect the public
-state ConfigMap, then restore the application: remove only Mail's temporary node
-selector, or scale Nextcloud/offline SQLite to the remembered replicas. Verify availability,
-mark `paused: 'false'`, and remove the empty lock directory from the published
-volume through an explicitly authorized maintenance operation. Never remove a
-lock while another job is working. Jobs request resumption before releasing RWO
-mounts; verify application rollout after job termination.
+The engine requests resumption on normal exit and SIGTERM. SIGKILL, including
+an OOM kill, cannot run its cleanup trap. The generator also emits a separate
+`<service>-backups-recovery` CronJob for `nextcloud`, `sqlite-offline`,
+`vaultwarden`, `statefulset-offline` and `mail`. Its script is copied into a
+ConfigMap and runs using the selected toolbox image; compatible existing images
+can run it without an engine rebuild. Online SQLite, LDAP, PostgreSQL and native
+GitLab captures do not pause an application and generate no recovery job.
+
+Both capture and recovery CronJobs start suspended. Activate recovery together
+with the capture schedule, through a project overlay patch targeting the CronJob
+named `backups-recovery` before the service prefix. Recovery runs every minute
+by default, with `concurrencyPolicy: Forbid`, one retry and a two-minute Job
+deadline. Capture retains its six-hour default `activeDeadlineSeconds`: choose a
+capture deadline appropriate to the allowed maintenance window. A hung capture
+must actually terminate before application writes can safely resume.
+
+Recovery reads the public pause state and lists only this service's capture
+pods in its namespace. Pending, Running, Unknown or missing phases block it,
+including terminating captures that have not reached a terminal phase. API
+errors fail closed. When all capture pods are Failed or Succeeded (or already
+garbage-collected), a JSON patch claims the exact ConfigMap resourceVersion and
+sets `paused: recovering`. A changed snapshot aborts the attempt. Recovery then
+restores saved Deployment/StatefulSet replicas, or removes only Mail's reserved
+pause selector, and clears the pause flag. Partial failures retry from
+`recovering`; normal captures require `paused: false` before stopping a service.
+
+The recovery job reuses the existing scoped orchestration ServiceAccount and
+Role. It mounts no application credentials, Secret, application volume or
+published volume, so it can run without waiting for a busy RWO PVC. It cannot
+delete pods. Keep the capture labels `app.kubernetes.io/name=backup-job` and
+`backup.osixia.net/service=<service>`: these identify all captures, including
+manual Jobs. Recovery uses a different application label.
+
+This requests resumption, not a healthy rollout: verify availability separately.
+Recovery cannot force a partitioned node to stop writing. Unknown/running
+captures are left alone until Kubernetes establishes their termination; never
+force-delete one to bypass this guard without first fencing its node. API,
+scheduling or workload failures can still require operator intervention. The
+one-minute schedule is not a guarantee of recovery within one minute.
+
+The abandoned `/published/.backup-lock` deliberately remains after automatic
+resumption. Recovery neither publishes nor retries the failed archive. Inspect
+the failure, suspend capture scheduling, ensure no capture is active, verify
+availability, and remove the empty lock directory through an authorized
+maintenance operation before retrying. Inspect unfinished ciphertext separately;
+`.tmp` files are not complete backups. Never remove a lock while a job works.
+
+For manual recovery, suspend both CronJobs and inspect the public state ConfigMap
+(including `paused: recovering`). Restore remembered replicas or remove only
+Mail's temporary selector, verify availability, then mark `paused: false`.
+Never reset recovery state by blindly reapplying its initial manifest. Normal
+captures still request resumption before releasing RWO mounts; verify rollout
+after their pod terminates.
 
 On an isolated restore host, verify the `.sha256` marker and decrypt the complete
 archive with the operator's age identity before extracting. Preserve numerical
@@ -151,6 +200,10 @@ local HTTPS API using a synthetic token and a disposable certificate. All other
 application orchestration is simulated. Only the temporary synthetic TLS fixture
 is mounted; no real data, kubeconfig or credentials are available in the container.
 The container has no external network and drops all capabilities.
+Recovery tests also require Bash and jq on the host. They execute the production
+recovery script against a disposable fake kubectl API: terminal OOM pods,
+active/unknown captures, stale state snapshots, partial failures, all three
+workload kinds and idempotent retries. No real cluster is contacted.
 
 ## GitLab chart native archive profile
 

@@ -266,3 +266,15 @@ faut pas utiliser ce profil pour prétendre capturer des données conservées ho
 du PVC monté. Les répertoires éphémères et services externes restent à traiter
 selon le contexte applicatif. Une perte brutale du nœud peut demander une reprise
 opérateur ; lire l’état sauvegardé avant de remettre les répliques.
+
+## Reprise indépendante après interruption
+
+Les profils qui arrêtent un service génèrent aussi un CronJob de reprise séparé :
+Nextcloud, SQLite hors ligne, Vaultwarden, StatefulSet hors ligne et Mail. Il
+reprend le service après la fin de tous ses pods de capture, y compris après un
+OOM/SIGKILL qui empêche le nettoyage du moteur. Il ne monte aucune donnée ni
+aucun Secret et conserve le verrou de la sauvegarde échouée pour inspection.
+Les deux calendriers sont initialement suspendus ; activer explicitement la
+reprise avec la capture. Le script est distribué par ConfigMap et fonctionne
+avec les images compatibles existantes, sans reconstruction obligatoire.
+Voir le [protocole, les limites et l’activation](kubernetes/README.md#recovery-and-restore).

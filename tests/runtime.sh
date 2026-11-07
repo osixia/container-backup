@@ -146,6 +146,79 @@ tar -xzf /tmp/wal.tar.gz -C /tmp/wal-restored
 [[ $(sqlite3 /tmp/wal-restored/sqlite.db 'PRAGMA integrity_check;') == ok ]]
 [[ $(sqlite3 /tmp/wal-restored/sqlite.db 'SELECT COUNT(*) FROM fixture;') == 2 ]]
 
+# Kill the real engine after its persisted pause: EXIT cannot run on SIGKILL.
+# The independent recovery must refuse the live capture, then resume it once
+# the API reports its pod terminal, without touching the abandoned volume lock.
+cat > /tmp/mock-bin/kubectl <<'MOCK'
+#!/usr/bin/env python3
+import json,sys
+from pathlib import Path
+args=[a for a in sys.argv[1:] if not a.startswith('--kubeconfig=')
+      and not a.startswith('--namespace=') and not a.startswith('--request-timeout=')]
+path=Path('/tmp/recovery-state')
+state=json.loads(path.read_text())
+result={}
+if args[:2] == ['get','configmap']:
+    result=state if args[-1]=='json' else state['data']['paused']
+elif args[:2] == ['get','hpa']:
+    result={'items':[]}
+elif args[:2] == ['get','deployment']:
+    result={'spec':{'selector':{'matchLabels':{'app':'fixture'}}}} if args[-1]=='json' else Path('/tmp/recovery-replicas').read_text()
+elif args[:2] == ['get','pods']:
+    result=json.loads(Path('/tmp/recovery-pods').read_text()) if 'backup-job' in args[3] else {'items':[]}
+elif args[:2] == ['patch','configmap']:
+    patch=json.loads(args[-1])
+    if '--type=json' in args:
+        assert patch[0]['value']==state['metadata']['resourceVersion']
+        state['data']['paused']=patch[1]['value']
+    else:
+        state['data'].update(patch['data'])
+    state['metadata']['resourceVersion']+='1'
+    path.write_text(json.dumps(state))
+elif args[:2] == ['scale','deployment']:
+    Path('/tmp/recovery-replicas').write_text(args[-1].split('=')[1])
+else:
+    raise AssertionError(args)
+print(json.dumps(result) if isinstance(result,dict) else result)
+MOCK
+chmod 0755 /tmp/mock-bin/kubectl
+printf '{"metadata":{"resourceVersion":"1"},"data":{"paused":"false","replicas":""}}' > /tmp/recovery-state
+printf '{"items":[{"status":{"phase":"Running"}}]}' > /tmp/recovery-pods
+printf 1 > /tmp/recovery-replicas
+cat > /scripts/capture.sh <<'CAPTURE'
+source /usr/local/lib/backup/deployment.sh
+prepare_backup() {
+    pause_deployment
+    touch /tmp/capture-paused
+    # No child is left behind when the test kills this process.
+    while :; do :; done
+}
+resume_application() { resume_deployment; }
+CAPTURE
+export SERVICE=crashtest RECOVERY_KIND=deployment
+bash /usr/local/lib/backup/run.sh >/tmp/crash.log 2>&1 &
+capture_pid=$!
+for ((attempt=0; attempt<100; attempt++)); do
+    [[ -f /tmp/capture-paused ]] && break
+    sleep 0.05
+done
+[[ -f /tmp/capture-paused && $(cat /tmp/recovery-replicas) == 0 ]]
+bash /usr/local/lib/backup/recover.sh >/tmp/recovery-active.log
+[[ $(cat /tmp/recovery-replicas) == 0 ]]
+kill -KILL "$capture_pid"
+capture_status=0
+wait "$capture_pid" || capture_status=$?
+[[ $capture_status == 137 ]]
+[[ $(jq -r '.data.paused' /tmp/recovery-state) == true ]]
+[[ -d /published/.backup-lock ]]
+printf '{"items":[{"status":{"phase":"Failed"}}]}' > /tmp/recovery-pods
+bash /usr/local/lib/backup/recover.sh >/tmp/recovery-terminal.log
+[[ $(cat /tmp/recovery-replicas) == 1 ]]
+[[ $(jq -r '.data.paused' /tmp/recovery-state) == false ]]
+[[ -d /published/.backup-lock ]]
+if bash /usr/local/lib/backup/run.sh >/tmp/recovery-locked.log 2>&1; then exit 1; fi
+rmdir /published/.backup-lock
+
 # Exercise the actual kubectl binary and engine helper against an isolated fake
 # API: no Kubernetes environment or real token is available to fall back to.
 export PATH=$original_path

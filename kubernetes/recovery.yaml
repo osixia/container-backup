@@ -1,0 +1,82 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backups-recovery
+spec:
+  schedule: '* * * * *'
+  timeZone: Etc/UTC
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: backup-recovery
+        spec:
+          serviceAccountName: backups
+          automountServiceAccountToken: true
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: recovery
+              image: osixia/backup:develop
+              command: [bash, /recovery/recover.sh]
+              env:
+                - name: SERVICE
+                  value: '@@SERVICE@@'
+                - name: APPLICATION
+                  value: '@@APPLICATION@@'
+                - name: STATE_CONFIGMAP
+                  value: '@@STATE_CONFIGMAP@@'
+                - name: RECOVERY_KIND
+                  value: '@@RECOVERY_KIND@@'
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: KUBECONFIG
+                  value: /kube/config
+                - name: HOME
+                  value: /tmp
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 512Mi
+              volumeMounts:
+                - name: recovery
+                  mountPath: /recovery
+                  readOnly: true
+                - name: kubeconfig
+                  mountPath: /kube
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: recovery
+              configMap:
+                name: backups-recovery
+            - name: kubeconfig
+              configMap:
+                name: backups-kubeconfig
+            - name: tmp
+              emptyDir:
+                sizeLimit: 16Mi

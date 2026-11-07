@@ -12,6 +12,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = {p.stem for p in (ROOT / 'runtime/captures').glob('*.sh')}
 INVENTORY = '.generated.json'
+PAUSED_PROFILES = {'mail', 'nextcloud', 'sqlite-offline', 'vaultwarden', 'statefulset-offline'}
 
 
 def dump(value):
@@ -55,11 +56,14 @@ def generate(config_path):
     for name, service in config['services'].items():
         if not isinstance(name, str) or not re.fullmatch(r'[a-z]+', name) or name == 'common':
             raise ValueError('Service names must contain lowercase letters only, excluding common')
-        if not isinstance(service, dict) or set(service) - {'profile', 'namespace', 'settings', 'overlay', 'files', 'capture'}:
+        if not isinstance(service, dict) or set(service) - {'profile', 'namespace', 'settings', 'overlay', 'files', 'capture', 'recovery'}:
             raise ValueError(f'{name}: unknown service field')
         profile = service.get('profile')
         if profile not in PROFILES:
             raise ValueError(f'{name}: unknown profile')
+        recovery = service.get('recovery', profile in PAUSED_PROFILES and 'capture' not in service)
+        if not isinstance(recovery, bool) or (recovery and profile not in PAUSED_PROFILES):
+            raise ValueError(f'{name}: recovery must be a boolean and requires a pause/resume profile')
         namespace = service.get('namespace')
         if not isinstance(namespace, str) or not re.fullmatch(r'[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?', namespace):
             raise ValueError(f'{name}: invalid namespace')
@@ -67,7 +71,7 @@ def generate(config_path):
         if not isinstance(settings, dict) or 'SERVICE' in settings:
             raise ValueError(f'{name}: settings must be a mapping without SERVICE')
         settings = dict(settings)
-        if profile in {'mail', 'nextcloud', 'sqlite-offline', 'vaultwarden', 'statefulset-offline'}:
+        if profile in PAUSED_PROFILES:
             application = settings.get('APPLICATION')
             if not isinstance(application, str) or not re.fullmatch(r'[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?', application):
                 raise ValueError(f'{name}: APPLICATION must identify the workload')
@@ -145,6 +149,16 @@ def generate(config_path):
                                   'volumeMounts': [{'name': 'kubeconfig', 'mountPath': '/kube', 'readOnly': True}]}],
                               'volumes': [{'name': 'kubeconfig', 'configMap': {'name': 'backups-kubeconfig'}}]}}}}}}
             kustomization['patches'] = [{'patch': dump(auth_patch).decode()}] + kustomization.get('patches', [])
+        if recovery:
+            kind = 'daemonset' if profile == 'mail' else ('statefulset' if profile == 'statefulset-offline' else 'deployment')
+            recovery_manifest = (ROOT / 'kubernetes/recovery.yaml').read_text()
+            for placeholder, value in {'SERVICE': name, 'APPLICATION': settings['APPLICATION'],
+                                       'STATE_CONFIGMAP': settings['STATE_CONFIGMAP'], 'RECOVERY_KIND': kind}.items():
+                recovery_manifest = recovery_manifest.replace('@@' + placeholder + '@@', value)
+            files[f'{name}/recovery.yaml'] = recovery_manifest.encode()
+            files[f'{name}/recover.sh'] = (ROOT / 'runtime/recover.sh').read_bytes()
+            kustomization['resources'].append('recovery.yaml')
+            kustomization['configMapGenerator'].append({'name': 'backups-recovery', 'files': ['recover.sh']})
         if gitlab_coverage:
             files[f'{name}/coverage.py'] = (ROOT / 'kubernetes/profiles/gitlab/coverage.py').read_bytes()
             kustomization['configMapGenerator'].append({'name': 'backups-gitlab-coverage', 'files': ['coverage.py']})
@@ -183,7 +197,7 @@ def generate(config_path):
         if not isinstance(supplied, dict):
             raise ValueError(f'{name}: files must map destination filenames to project source paths')
         for target, source in supplied.items():
-            if not isinstance(target, str) or '/' in target or target in {'', '.', '..', 'kustomization.yaml', 'capture.sh', 'control.yaml', 'kubeconfig.yaml', 'coverage.py'}:
+            if not isinstance(target, str) or '/' in target or target in {'', '.', '..', 'kustomization.yaml', 'capture.sh', 'control.yaml', 'kubeconfig.yaml', 'coverage.py', 'recovery.yaml', 'recover.sh'}:
                 raise ValueError(f'{name}: invalid destination filename')
             source_path = (config_path.parent / source).resolve()
             if not source_path.is_relative_to(config_path.parent):

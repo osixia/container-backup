@@ -5,9 +5,9 @@
 [[ "$GITLAB_MAX_BACKUP_AGE_MINUTES" =~ ^[1-9][0-9]*$ ]]
 
 prepare_backup() {
-    k get cronjob "$GITLAB_BACKUP_CRONJOB" -o json > "$workdir/native-cronjob.json"
+    k get cronjob "$GITLAB_BACKUP_CRONJOB" -o json > "${workdir:?}/native-cronjob.json"
     k get jobs -o json > "$workdir/native-jobs.json"
-    python3 - "$workdir" "$stage" "$GITLAB_BACKUP_CRONJOB" "$GITLAB_MAX_BACKUP_AGE_MINUTES" <<'PYTHON'
+    python3 - "${workdir:?}" "${stage:?}" "$GITLAB_BACKUP_CRONJOB" "$GITLAB_MAX_BACKUP_AGE_MINUTES" <<'PYTHON'
 import datetime
 import json
 from pathlib import Path
